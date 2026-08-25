@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+.minio_data/
+.postgres_data/
+airflow/logs/
+airflow/airflow-webserver.pid
+airflow/airflow-scheduler.pid
+airflow/airflow.db
+spark-warehouse/
+checkpoint/
+spark/*.jar
+
