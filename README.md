@@ -1,163 +1,124 @@
-# Real-Time Indian Stock Market Data Engineering Pipeline
+# Real-Time Forex & Commodity Time-Series Data Pipeline (AWS Free Tier)
 
-An end-to-end, production-grade data engineering pipeline that ingests real-time stock data from the National Stock Exchange of India (NSE), processes it using a stream-and-batch hybrid (Kappa/Lambda) architecture, and stores it in a Snowflake Data Warehouse for analytical querying.
-
----
-
-## 🏗️ System Architecture
-The pipeline implements a modern data lakehouse design:
-
-```
-[ yfinance API ]
-       │  (Scrapes NSE live prices every 2s)
-       ▼
-[ Kafka Producer ]
-       │  (Publishes to "stock-prices" topic)
-       ▼
-[ Apache Kafka ] ◄─── [ Spark Structured Streaming ]
-                           │ (Windowed stream ingestion)
-                           ▼
-                      [ MinIO Data Lake ]
-                       ├── bronze/ (Raw JSON stream)
-                       ├── raw/ (Airflow Batch CSVs)
-                       └── silver/ (Spark Fact & Dim Parquet tables)
-                           │
-                           ▼
-                      [ Apache Airflow ]
-                       ├── Triggers Spark Batch ETL (Deduplication + SCD Type 2)
-                       └── Syncs Silver Parquet files to Snowflake DWH
-                           │
-                           ▼
-                      [ Snowflake DWH ]
-                       ├── FACT_STOCK_PRICES
-                       └── DIM_STOCKS (Type 2 Slowly Changing Dimension)
-```
+An enterprise-grade, lightweight, and cost-efficient ($0/month) real-time data engineering pipeline designed to ingest, stream, and store 5-minute interval financial candles for Forex pairs (`USD_JPY`) and Commodities (`XAU_USD`, `XAG_USD`) from the **Oanda API** into a time-series optimized **AWS RDS PostgreSQL** database.
 
 ---
 
-## 🛠️ Tech Stack & Infrastructure
-* **Orchestration**: Apache Airflow 2.7.2 (running on Python 3.10)
-* **Stream Processing**: Apache Spark 3.5.2 (Structured Streaming & Batch SparkSQL)
-* **Message Broker**: Apache Kafka (Confluent Platform 7.5.0)
-* **Object Storage / Data Lake**: MinIO (S3-compatible local storage)
-* **Data Warehouse**: Snowflake Cloud Data Warehouse
-* **Database (Metastore)**: PostgreSQL 15 (Airflow metadata backend)
-* **Language**: Python 3.10 (with `yfinance`, `pyspark`, `minio`, `snowflake-connector-python`, and `pyarrow`)
-* **Deployment**: Docker & Docker Compose
+## 🏗️ Architecture & Data Flow
+
+```mermaid
+graph LR
+    Oanda[Oanda API] -->|M5 candles| EC2_Prod[EC2: producer.py]
+    EC2_Prod -->|Publish SSL| Aiven[Aiven Managed Kafka]
+    Aiven -->|Read Stream| EC2_Cons[EC2: consumer.py]
+    EC2_Cons -->|Bulk-Insert| RDS_PG[Amazon RDS PostgreSQL]
+    
+    Cron[Linux Cron Job] -->|Trigger Daily Backfill| EC2_Back[EC2: backfill.py]
+    EC2_Back -->|Gap-Filling Upsert| RDS_PG
+```
+
+1. **Ingestion Layer (`producer.py`)**: Runs 24/7 on an EC2 instance. It polls Oanda’s REST API every 10 seconds. When a new 5-minute candle completes, it publishes the OHLC (Open, High, Low, Close) values and volume to Kafka.
+2. **Event Streaming Layer (Aiven Kafka)**: A fully managed, serverless Kafka cluster on the cloud. Decouples ingestion from ingestion, protecting against message loss.
+3. **Processing & Storage (`consumer.py`)**: A lightweight Python script consuming messages from Kafka and writing them to **Amazon RDS PostgreSQL** in real-time.
+4. **Self-Healing & Gap-Filling (`backfill.py`)**: A daily cron job that queries Oanda's history for the entire day's candles and performs a database `UPSERT`. If any candles were missed due to network drops, it automatically heals the database gaps.
+
+---
+
+## 🛠️ Technology Stack
+
+* **Source API**: Oanda Developer API (5-minute `M5` granularity candles).
+* **Message Broker**: Aiven for Apache Kafka (Managed, Serverless, SSL-encrypted).
+* **Database**: AWS RDS PostgreSQL (`db.t4g.micro` - Free Tier) with B-Tree composite indexes optimized for time-series range scans.
+* **Orchestration**: Systemd Services (for 24/7 streaming) and Linux Cron (for daily reconciliation).
+* **Environment**: AWS EC2 (`t2.micro` - Free Tier Ubuntu 22.04 LTS).
 
 ---
 
 ## 📁 Repository Structure
-```
-Real_Time_Stock_Data_Project/
-├── airflow/
-│   └── dags/
-│       └── stock_etl_dag.py        # Airflow DAG (Ingestion, Batch Trigger, Snowflake Load)
-├── kafka/
-│   └── producer.py                 # Live NSE stock scraper & Kafka publisher
-├── spark/
-│   ├── streaming_job.py            # Spark Structured Streaming (Kafka -> MinIO Bronze)
-│   ├── batch_job.py                # Spark Batch ETL (Deduplication & SCD Type 2)
-│   ├── hadoop-aws-3.3.4.jar        # Pre-loaded S3 filesystem JAR
-│   └── aws-java-sdk-bundle-1.12.262.jar # Pre-loaded S3 AWS SDK JAR
-├── snowflake/
-│   ├── schema.sql                  # Snowflake table creation & staging setup
-│   └── analytics.sql               # Advanced DWH analytics & temporal joins
-├── docker-compose.yml              # Cluster services configuration
-├── requirements.txt                # Workspace Python requirements
-└── README.md                       # Project documentation
+
+```text
+├── db_setup.py          # Database schema initialization script
+├── ca.pem               # SSL Certificate (Git-ignored)
+├── .env                 # Environment variables (Git-ignored)
+├── .gitignore           # Safety rules (hides keys and certs)
+├── requirements.txt     # Python package dependencies
+└── kafka/
+    ├── db_bootstrap.py  # 10-year historical pagination loader (2016-today)
+    ├── producer.py      # Real-time Oanda-to-Aiven Kafka publisher
+    ├── consumer.py      # Real-time Aiven Kafka-to-PostgreSQL loader
+    └── backfill.py      # Daily gap-filling & reconciliation script
 ```
 
 ---
 
-## 🚀 Setup & Execution Instructions
+## ⚙️ Configuration & Deployment
 
-### Prerequisites
-* Docker & Docker Compose installed on your system.
-* A Snowflake account (with credentials and account ID).
+### 1. Database Setup (AWS RDS PostgreSQL)
+Create a PostgreSQL database on AWS RDS using the **Free Tier** template:
+* Class: `db.t4g.micro` (or `db.t2.micro`)
+* Storage: 20 GB gp2 SSD (Autoscaling disabled)
+* Public Access: **Yes** (to query from Spyder/local IDEs)
+* Port: `5432` (Security Group inbound rule open to public `0.0.0.0/0`)
 
-### Step 1: Clone and Spin Up the Infrastructure
-1. Clone this repository to your local machine.
-2. Spin up the containerized cluster (Kafka, Spark, MinIO, Airflow, Postgres):
-   ```bash
-   docker compose up -d
-   ```
-3. Verify that all services are running:
-   ```bash
-   docker compose ps
-   ```
+### 2. Message Broker (Aiven Kafka)
+Sign up on Aiven, create a free **Apache Kafka** cluster, and:
+1. Create a topic named **`stock-prices`**.
+2. Download the **CA Certificate** (`ca.pem`) and save it in the project root directory.
+3. Copy the **Service URI** (Bootstrap Server).
 
-### Step 2: Set up Snowflake Schema
-Log into your Snowflake account and execute the DDL queries inside `snowflake/schema.sql` to initialize your database (`STOCK_DB`), create the file format, and set up the tables (`FACT_STOCK_PRICES` and `DIM_STOCKS`).
+### 3. Environment Variables (`.env`)
+Create a `.env` file in the root folder:
+```env
+OANDA_API_KEY=your_oanda_api_key
+OANDA_ENVIRONMENT=practice
 
-### Step 3: Configure Airflow Connections
-1. Access the Airflow UI at `http://localhost:8080` (Credentials: `admin`/`admin`).
-2. Go to **Admin** ➡️ **Connections** ➡️ **Add a new record** (`+` button).
-3. Add a Snowflake connection with the ID **`snowflake_default`**:
-   * **Connection Type**: `Snowflake`
-   * **Account**: `<your_snowflake_account_id>` (e.g. `BEFDQWH-BW87134`)
-   * **Login**: `<username>`
-   * **Password**: `<password>`
-   * **Database**: `STOCK_DB`
-   * **Warehouse**: `COMPUTE_WH`
-   * **Schema**: `PUBLIC`
-4. Click **Save**.
+AIVEN_KAFKA_BOOTSTRAP_SERVER=your_aiven_uri:port
+AIVEN_KAFKA_CA_CERT_PATH=/home/ubuntu/Real-Time-Stock-Data-Engineering-Project/ca.pem
 
-### Step 4: Start the Live Ingestion
-1. Create a local virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-2. Run the Kafka producer:
-   ```bash
-   python kafka/producer.py
-   ```
-   *Note: If the Indian stock exchanges are closed (weekends/nights), the producer automatically switches to simulating live market feeds so you can test the pipeline anytime.*
+RDS_POSTGRES_HOST=your_rds_endpoint
+RDS_POSTGRES_USER=postgres
+RDS_POSTGRES_PASSWORD=your_db_password
+```
 
-### Step 5: Trigger the Airflow DAG
-1. In the Airflow UI, locate the **`real_time_stock_etl`** DAG.
-2. Unpause the DAG and click **Trigger DAG**.
-3. Watch the Grid View as Airflow:
-   * Scrapes historical CSV data from `yfinance`.
-   * Contacts the Spark Master to run the batch jobs.
-   * Connects to Snowflake and copies the data into the tables.
+### 4. Database Bootstrapping
+Before starting the live streams, run the database setup and load 10 years of historical data:
+```bash
+# 1. Create tables and Dimension profiles
+python db_setup.py
+
+# 2. Bulk-load historical M5 candles (2016-Today) and build B-Tree indexes
+python kafka/db_bootstrap.py
+```
+
+### 5. Running 24/7 on EC2
+Deploy the scripts as Systemd background daemons on your Ubuntu instance:
+```bash
+sudo nano /etc/systemd/system/forex-consumer.service
+```
+Paste the following config:
+```ini
+[Unit]
+Description=Oanda Forex PostgreSQL Consumer
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Real-Time-Stock-Data-Engineering-Project
+ExecStart=/home/ubuntu/Real-Time-Stock-Data-Engineering-Project/.venv/bin/python /home/ubuntu/Real-Time-Stock-Data-Engineering-Project/kafka/consumer.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+Enable and start the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable forex-consumer
+sudo systemctl start forex-consumer
+```
+*(Repeat the same configuration for the producer script `producer.py` to keep it running 24/7).*
 
 ---
 
-## 📊 Analytical DWH Queries in Snowflake
-
-Once the data is synced, run these queries inside your Snowflake worksheet:
-
-### 1. 10-Tick Simple Moving Average (SMA)
-Computes a rolling 10-tick moving average of the stock prices to identify market trends:
-```sql
-SELECT 
-    ticker,
-    event_timestamp,
-    price,
-    AVG(price) OVER (
-        PARTITION BY ticker 
-        ORDER BY event_timestamp 
-        ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
-    ) AS sma_10_ticks
-FROM FACT_STOCK_PRICES;
-```
-
-### 2. SCD Type 2 Temporal Join
-Joins historical transaction prices with the dimension table to fetch company metadata corresponding to the exact time the trade occurred:
-```sql
-SELECT 
-    f.ticker,
-    d.company_name,
-    d.sector,
-    f.price,
-    f.event_timestamp
-FROM FACT_STOCK_PRICES f
-JOIN DIM_STOCKS d 
-  ON f.ticker = d.ticker
- AND f.date >= d.start_date
- AND (d.end_date IS NULL OR f.date <= d.end_date)
-ORDER BY f.event_timestamp DESC;
-```
+## 📈 Time-Series Query Optimization
+To optimize read operations for strategy backtesting (e.g., in Spyder or Jupyter Notebooks), the database builds a composite B-Tree index on `(ticker, event_timestamp DESC)`. This reduces query search complexity from $O(N)$ full table scans to $O(\log N)$ index scans, returning years of data in milliseconds.
