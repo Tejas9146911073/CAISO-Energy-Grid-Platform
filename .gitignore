@@ -12,4 +12,7 @@ airflow/airflow.db
 spark-warehouse/
 checkpoint/
 spark/*.jar
+ca.pem
+*.pem
+
 
