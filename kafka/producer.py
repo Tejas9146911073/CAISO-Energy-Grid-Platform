@@ -74,7 +74,6 @@ def main():
                 latest_time = lmp_df["Time"].max()
                 latest_time_str = latest_time.isoformat()
                 
-                # Check if this is a new 5-minute pricing interval
                 if last_published_lmp_time != latest_time_str:
                     logger.info(f"New CAISO LMP pricing interval detected: {latest_time_str}")
                     latest_lmp_rows = lmp_df[lmp_df["Time"] == latest_time]
@@ -84,7 +83,6 @@ def main():
                         if not node:
                             continue
                             
-                        # Send Total Price, Congestion, and Loss component messages
                         for lmp_type, col in [("LMP", "LMP"), ("MCC", "Congestion"), ("MCL", "Loss")]:
                             message = {
                                 "type": "LMP",
@@ -104,40 +102,32 @@ def main():
             # ========================================================
             load_df = caiso.get_load(date="today")
             if not load_df.empty:
-                load_df = load_df.rename(columns={
-                    "Time": "event_timestamp",
-                    "Actual Load": "actual_load_mw",
-                    "Load": "actual_load_mw",
-                    "Forecast Load": "forecast_load_mw",
-                    "Forecast": "forecast_load_mw"
-                })
+                latest_load_row = load_df.iloc[-1]
+                time_col = "Time" if "Time" in latest_load_row else "Interval Start"
+                latest_time = latest_load_row[time_col]
+                latest_time_str = latest_time.isoformat()
                 
-                latest_load_time = load_df["event_timestamp"].max()
-                latest_load_time_str = latest_load_time.isoformat()
-                
-                # Check if this is a new Load interval
-                if last_published_load_time != latest_load_time_str:
-                    logger.info(f"New CAISO Load interval detected: {latest_load_time_str}")
+                if last_published_load_time != latest_time_str:
+                    logger.info(f"New CAISO Load interval detected: {latest_time_str}")
                     
-                    latest_load_row = load_df[load_df["event_timestamp"] == latest_load_time].iloc[0]
-                    actual = int(latest_load_row["actual_load_mw"]) if not pd.isna(latest_load_row["actual_load_mw"]) else 0
-                    forecast = int(latest_load_row["forecast_load_mw"]) if not pd.isna(latest_load_row["forecast_load_mw"]) else 0
+                    actual = int(latest_load_row["Load"]) if "Load" in latest_load_row and not pd.isna(latest_load_row["Load"]) else 0
+                    forecast = int(latest_load_row["Forecast"]) if "Forecast" in latest_load_row and not pd.isna(latest_load_row["Forecast"]) else actual
                     
                     message = {
                         "type": "LOAD",
-                        "timestamp": latest_load_time_str,
+                        "timestamp": latest_time_str,
                         "actual_load_mw": actual,
                         "forecast_load_mw": forecast,
-                        "date": str(latest_load_time.date())
+                        "date": str(latest_time.date())
                     }
                     producer.send("stock-prices", value=message)
                     logger.info(f"Published latest Grid Load (Demand: {actual} MW) to Kafka")
-                    last_published_load_time = latest_load_time_str
+                    last_published_load_time = latest_time_str
 
         except Exception as e:
             logger.error(f"Error during CAISO polling cycle: {e}")
 
-        # Poll every 20 seconds to capture the 5-minute ticks
+        # Poll every 20 seconds
         time.sleep(20)
 
 if __name__ == "__main__":

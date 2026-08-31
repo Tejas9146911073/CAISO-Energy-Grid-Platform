@@ -23,15 +23,10 @@ def get_db_connection():
 
 def bootstrap_caiso_data():
     logger.info("Initializing CAISO Historical Bootstrap (Last 7 Days)...")
-    
-    # Initialize CAISO client
     caiso = gridstatus.CAISO()
     
-    # Define start and end time range (UTC)
     end_time = pd.Timestamp.now(tz="UTC")
     start_time = end_time - pd.Timedelta(days=7)
-    
-    logger.info(f"Time range: {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')} to {end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -43,23 +38,18 @@ def bootstrap_caiso_data():
     try:
         load_df = caiso.get_load(start=start_time, end=end_time)
         if not load_df.empty:
-            load_df = load_df.rename(columns={
-                "Time": "event_timestamp",
-                "Actual Load": "actual_load_mw",
-                "Load": "actual_load_mw",
-                "Forecast Load": "forecast_load_mw",
-                "Forecast": "forecast_load_mw"
-            })
-            
-            load_df["date"] = pd.to_datetime(load_df["event_timestamp"]).dt.date
-            
             load_records = []
             for _, row in load_df.iterrows():
-                ts = row["event_timestamp"].isoformat()
-                actual = int(row["actual_load_mw"]) if not pd.isna(row["actual_load_mw"]) else 0
-                forecast = int(row["forecast_load_mw"]) if not pd.isna(row["forecast_load_mw"]) else 0
-                date_str = str(row["date"])
-                load_records.append((ts, actual, forecast, date_str))
+                time_val = row["Time"] if "Time" in row else row["Interval Start"]
+                ts = time_val.isoformat()
+                
+                # Check for Load column safely
+                actual = int(row["Load"]) if "Load" in row and not pd.isna(row["Load"]) else (int(row["Actual Load"]) if "Actual Load" in row and not pd.isna(row["Actual Load"]) else 0)
+                forecast = int(row["Forecast"]) if "Forecast" in row and not pd.isna(row["Forecast"]) else actual
+                date_str = str(time_val.date())
+                
+                if actual > 0:
+                    load_records.append((ts, actual, forecast, date_str))
                 
             logger.info(f"Bulk-inserting {len(load_records)} Load intervals into fact_caiso_load...")
             psycopg2.extras.execute_values(
