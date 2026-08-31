@@ -1,8 +1,4 @@
-kafka-python-ng==2.2.2
-psycopg2-binary==2.9.9
-requests==2.32.5
-python-dotenv==1.0.1
-pandas==2.2.2
-gridstatus==0.29.1
-fastapi==0.111.0
-uvicorn==0.30.1
+kafka-python-ng
+psycopg2-binary
+requests
+python-dotenv
