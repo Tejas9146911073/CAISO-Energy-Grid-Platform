@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 # Load Credentials
 load_dotenv()
-API_KEY = os.getenv("OANDA_API_KEY") # Kept for Oanda check if needed, but not used here
 
 # Aiven Kafka Credentials
 BOOTSTRAP_SERVER = os.getenv("AIVEN_KAFKA_BOOTSTRAP_SERVER")
@@ -66,20 +65,21 @@ def main():
             # 1. POLL REAL-TIME LMPs
             # ========================================================
             lmp_df = caiso.get_lmp(
+                date="today",
                 market="REAL_TIME_5_MIN",
-                locations=locations,
-                latest=True
+                locations=locations
             )
             
             if not lmp_df.empty:
-                latest_time = lmp_df["Time"].iloc[0]
+                latest_time = lmp_df["Time"].max()
                 latest_time_str = latest_time.isoformat()
                 
                 # Check if this is a new 5-minute pricing interval
                 if last_published_lmp_time != latest_time_str:
                     logger.info(f"New CAISO LMP pricing interval detected: {latest_time_str}")
+                    latest_lmp_rows = lmp_df[lmp_df["Time"] == latest_time]
                     
-                    for _, row in lmp_df.iterrows():
+                    for _, row in latest_lmp_rows.iterrows():
                         node = node_mapping.get(row["Location"])
                         if not node:
                             continue
@@ -102,7 +102,7 @@ def main():
             # ========================================================
             # 2. POLL REAL-TIME GRID LOAD
             # ========================================================
-            load_df = caiso.get_load(latest=True)
+            load_df = caiso.get_load(date="today")
             if not load_df.empty:
                 load_df = load_df.rename(columns={
                     "Time": "event_timestamp",
@@ -112,16 +112,16 @@ def main():
                     "Forecast": "forecast_load_mw"
                 })
                 
-                latest_load_time = load_df["event_timestamp"].iloc[0]
+                latest_load_time = load_df["event_timestamp"].max()
                 latest_load_time_str = latest_load_time.isoformat()
                 
                 # Check if this is a new Load interval
                 if last_published_load_time != latest_load_time_str:
                     logger.info(f"New CAISO Load interval detected: {latest_load_time_str}")
                     
-                    row = load_df.iloc[0]
-                    actual = int(row["actual_load_mw"]) if not pd.isna(row["actual_load_mw"]) else 0
-                    forecast = int(row["forecast_load_mw"]) if not pd.isna(row["forecast_load_mw"]) else 0
+                    latest_load_row = load_df[load_df["event_timestamp"] == latest_load_time].iloc[0]
+                    actual = int(latest_load_row["actual_load_mw"]) if not pd.isna(latest_load_row["actual_load_mw"]) else 0
+                    forecast = int(latest_load_row["forecast_load_mw"]) if not pd.isna(latest_load_row["forecast_load_mw"]) else 0
                     
                     message = {
                         "type": "LOAD",
@@ -137,8 +137,8 @@ def main():
         except Exception as e:
             logger.error(f"Error during CAISO polling cycle: {e}")
 
-        # Poll every 15 seconds to capture the 5-minute ticks immediately
-        time.sleep(15)
+        # Poll every 20 seconds to capture the 5-minute ticks
+        time.sleep(20)
 
 if __name__ == "__main__":
     main()
