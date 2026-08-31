@@ -58,36 +58,53 @@ except Exception as e:
     exit(1)
 
 def main():
-    logger.info("Starting PostgreSQL Consumer. Listening to Kafka...")
+    logger.info("Starting PostgreSQL CAISO Consumer. Listening to Kafka...")
     
     for message in consumer:
         data = message.value
-        ticker = data["ticker"]
-        timestamp = data["timestamp"]
-        open_val = data["open"]
-        high_val = data["high"]
-        low_val = data["low"]
-        close_val = data["close"]
-        volume = data["volume"]
-        date_str = timestamp.split("T")[0]
+        msg_type = data.get("type")
         
         try:
             conn = get_postgres_connection()
             cursor = conn.cursor()
             
-            # Upsert into PostgreSQL (inserts new candles, does nothing if already exists)
-            cursor.execute("""
-                INSERT INTO fact_forex_candles (ticker, event_timestamp, open, high, low, close, volume, date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ticker, event_timestamp) DO NOTHING;
-            """, (ticker, timestamp, open_val, high_val, low_val, close_val, volume, date_str))
-            
+            if msg_type == "LMP":
+                # Extract pricing variables
+                node = data["node"]
+                timestamp = data["timestamp"]
+                lmp_type = data["lmp_type"]
+                price = data["price_per_mwh"]
+                date_str = data["date"]
+                
+                # Write to fact_caiso_lmp
+                cursor.execute("""
+                    INSERT INTO fact_caiso_lmp (node, event_timestamp, lmp_type, price_per_mwh, date)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (node, event_timestamp, lmp_type) DO NOTHING;
+                """, (node, timestamp, lmp_type, price, date_str))
+                logger.info(f"Loaded Price to Database: {node} ({lmp_type}) @ {timestamp} -> ${price:.2f}/MWh")
+                
+            elif msg_type == "LOAD":
+                # Extract load variables
+                timestamp = data["timestamp"]
+                actual = data["actual_load_mw"]
+                forecast = data["forecast_load_mw"]
+                date_str = data["date"]
+                
+                # Write to fact_caiso_load
+                cursor.execute("""
+                    INSERT INTO fact_caiso_load (event_timestamp, actual_load_mw, forecast_load_mw, date)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (event_timestamp) DO NOTHING;
+                """, (timestamp, actual, forecast, date_str))
+                logger.info(f"Loaded Grid Load to Database: Actual={actual} MW, Forecast={forecast} MW @ {timestamp}")
+                
             conn.commit()
             cursor.close()
             conn.close()
-            logger.info(f"Loaded tick into PostgreSQL: {ticker} @ {timestamp}")
+            
         except Exception as e:
-            logger.error(f"Failed to write to PostgreSQL: {e}")
+            logger.error(f"Failed to load message of type {msg_type} into PostgreSQL: {e}")
 
 if __name__ == "__main__":
     main()

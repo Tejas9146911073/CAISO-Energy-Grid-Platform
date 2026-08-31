@@ -2,8 +2,9 @@ import os
 import json
 import time
 import logging
+import pandas as pd
+import gridstatus
 from datetime import datetime, timezone
-import requests
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 
@@ -13,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Load Credentials
 load_dotenv()
-API_KEY = os.getenv("OANDA_API_KEY")
-ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
+API_KEY = os.getenv("OANDA_API_KEY") # Kept for Oanda check if needed, but not used here
 
 # Aiven Kafka Credentials
 BOOTSTRAP_SERVER = os.getenv("AIVEN_KAFKA_BOOTSTRAP_SERVER")
@@ -22,46 +22,9 @@ CA_CERT_PATH = os.getenv("AIVEN_KAFKA_CA_CERT_PATH")
 KAFKA_USER = os.getenv("AIVEN_KAFKA_USERNAME", "avnadmin")
 KAFKA_PASS = os.getenv("AIVEN_KAFKA_PASSWORD")
 
-if not API_KEY:
-    logger.error("OANDA_API_KEY is missing in your .env file!")
-    exit(1)
 if not BOOTSTRAP_SERVER or not CA_CERT_PATH or not KAFKA_PASS:
     logger.error("Aiven Kafka credentials (server, cert path, or password) are missing in your .env file!")
     exit(1)
-
-# Establish Oanda URL based on environment
-if ENVIRONMENT.lower() == "live":
-    BASE_URL = "https://api-fxtrade.oanda.com"
-else:
-    BASE_URL = "https://api-fxpractice.oanda.com"
-
-headers = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Content-Type": "application/json"
-}
-
-# Fetch Oanda Account ID dynamically at startup
-logger.info("Connecting to Oanda to resolve Account ID...")
-try:
-    accounts_url = f"{BASE_URL}/v3/accounts"
-    response = requests.get(accounts_url, headers=headers)
-    ACCOUNT_ID = response.json().get("accounts", [])[0]["id"]
-    logger.info(f"Oanda Account ID resolved: {ACCOUNT_ID}")
-except Exception as e:
-    logger.error(f"Failed to connect to Oanda: {e}")
-    exit(1)
-
-def is_market_open():
-    now = datetime.now(timezone.utc)
-    weekday = now.weekday()
-    hour = now.hour
-    if weekday == 4 and hour >= 22:
-        return False
-    if weekday == 5:
-        return False
-    if weekday == 6 and hour < 22:
-        return False
-    return True
 
 # Initialize Kafka Producer with SASL_SSL encryption for Aiven
 logger.info("Initializing connection to Aiven Kafka using SASL_SSL...")
@@ -80,55 +43,102 @@ except Exception as e:
     logger.error(f"Failed to connect to Aiven Kafka: {e}")
     exit(1)
 
-INSTRUMENTS = ["XAU_USD", "XAG_USD", "USD_JPY"]
-GRANULARITY = "M5"
-last_published_timestamps = {inst: None for inst in INSTRUMENTS}
+# Target nodes
+locations = ["TH_NP15_GEN-APND", "TH_SP15_GEN-APND", "TH_ZP26_GEN-APND"]
+node_mapping = {
+    "TH_NP15_GEN-APND": "TH_NP15",
+    "TH_SP15_GEN-APND": "TH_SP15",
+    "TH_ZP26_GEN-APND": "TH_ZP26"
+}
+
+# Cache for deduplication
+last_published_lmp_time = None
+last_published_load_time = None
 
 def main():
-    logger.info(f"Starting Oanda {GRANULARITY} state-aware poller for {INSTRUMENTS}...")
+    global last_published_lmp_time, last_published_load_time
+    logger.info("Initializing CAISO Real-Time Grid Producer...")
+    caiso = gridstatus.CAISO()
+    
     while True:
-        if is_market_open():
-            for inst in INSTRUMENTS:
-                try:
-                    # Fetch last 2 candles
-                    url = f"{BASE_URL}/v3/instruments/{inst}/candles?granularity={GRANULARITY}&count=2&price=M"
-                    response = requests.get(url, headers=headers)
+        try:
+            # ========================================================
+            # 1. POLL REAL-TIME LMPs
+            # ========================================================
+            lmp_df = caiso.get_lmp(
+                market="REAL_TIME_5_MIN",
+                locations=locations,
+                latest=True
+            )
+            
+            if not lmp_df.empty:
+                latest_time = lmp_df["Time"].iloc[0]
+                latest_time_str = latest_time.isoformat()
+                
+                # Check if this is a new 5-minute pricing interval
+                if last_published_lmp_time != latest_time_str:
+                    logger.info(f"New CAISO LMP pricing interval detected: {latest_time_str}")
                     
-                    if response.status_code == 200:
-                        candles = response.json().get("candles", [])
-                        if candles:
-                            completed_candle = candles[0]
-                            if completed_candle.get("complete") is True:
-                                candle_time = completed_candle["time"]
-                                
-                                if last_published_timestamps[inst] != candle_time:
-                                    open_val = float(completed_candle["mid"]["o"])
-                                    high_val = float(completed_candle["mid"]["h"])
-                                    low_val = float(completed_candle["mid"]["l"])
-                                    close_val = float(completed_candle["mid"]["c"])
-                                    volume = int(completed_candle["volume"])
-                                    
-                                    data = {
-                                        "ticker": inst,
-                                        "open": open_val,
-                                        "high": high_val,
-                                        "low": low_val,
-                                        "close": close_val,
-                                        "volume": volume,
-                                        "timestamp": candle_time
-                                    }
-                                    
-                                    producer.send("stock-prices", value=data)
-                                    logger.info(f"New M5 candle -> {inst}: O={open_val:.4f}, H={high_val:.4f}, L={low_val:.4f}, C={close_val:.4f} (Time: {candle_time})")
-                                    last_published_timestamps[inst] = candle_time
-                    else:
-                        logger.error(f"Error fetching {inst}: {response.status_code} {response.text}")
-                except Exception as e:
-                    logger.error(f"Exception polling {inst}: {e}")
-            time.sleep(10)
-        else:
-            logger.info("Forex markets are closed (Weekend). Standby mode active. Checking again in 60s...")
-            time.sleep(60)
+                    for _, row in lmp_df.iterrows():
+                        node = node_mapping.get(row["Location"])
+                        if not node:
+                            continue
+                            
+                        # Send Total Price, Congestion, and Loss component messages
+                        for lmp_type, col in [("LMP", "LMP"), ("MCC", "Congestion"), ("MCL", "Loss")]:
+                            message = {
+                                "type": "LMP",
+                                "node": node,
+                                "timestamp": latest_time_str,
+                                "lmp_type": lmp_type,
+                                "price_per_mwh": float(row[col]),
+                                "date": str(latest_time.date())
+                            }
+                            producer.send("stock-prices", value=message)
+                            
+                    logger.info(f"Published latest LMP pricing to Kafka for {locations}")
+                    last_published_lmp_time = latest_time_str
+                    
+            # ========================================================
+            # 2. POLL REAL-TIME GRID LOAD
+            # ========================================================
+            load_df = caiso.get_load(latest=True)
+            if not load_df.empty:
+                load_df = load_df.rename(columns={
+                    "Time": "event_timestamp",
+                    "Actual Load": "actual_load_mw",
+                    "Load": "actual_load_mw",
+                    "Forecast Load": "forecast_load_mw",
+                    "Forecast": "forecast_load_mw"
+                })
+                
+                latest_load_time = load_df["event_timestamp"].iloc[0]
+                latest_load_time_str = latest_load_time.isoformat()
+                
+                # Check if this is a new Load interval
+                if last_published_load_time != latest_load_time_str:
+                    logger.info(f"New CAISO Load interval detected: {latest_load_time_str}")
+                    
+                    row = load_df.iloc[0]
+                    actual = int(row["actual_load_mw"]) if not pd.isna(row["actual_load_mw"]) else 0
+                    forecast = int(row["forecast_load_mw"]) if not pd.isna(row["forecast_load_mw"]) else 0
+                    
+                    message = {
+                        "type": "LOAD",
+                        "timestamp": latest_load_time_str,
+                        "actual_load_mw": actual,
+                        "forecast_load_mw": forecast,
+                        "date": str(latest_load_time.date())
+                    }
+                    producer.send("stock-prices", value=message)
+                    logger.info(f"Published latest Grid Load (Demand: {actual} MW) to Kafka")
+                    last_published_load_time = latest_load_time_str
+
+        except Exception as e:
+            logger.error(f"Error during CAISO polling cycle: {e}")
+
+        # Poll every 15 seconds to capture the 5-minute ticks immediately
+        time.sleep(15)
 
 if __name__ == "__main__":
     main()

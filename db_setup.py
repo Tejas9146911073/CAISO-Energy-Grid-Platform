@@ -26,52 +26,59 @@ def setup_database():
         )
         cursor = conn.cursor()
         
-        # 1. Create Fact Table with Composite Primary Key (prevents duplicate time-series entries)
-        print("Creating table: fact_forex_candles...")
+        # 1. Create Node Dimension Profile Table
+        print("Creating table: dim_caiso_nodes...")
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS fact_forex_candles (
-                ticker VARCHAR(20) NOT NULL,
-                event_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
-                open NUMERIC(15, 5) NOT NULL,
-                high NUMERIC(15, 5) NOT NULL,
-                low NUMERIC(15, 5) NOT NULL,
-                close NUMERIC(15, 5) NOT NULL,
-                volume BIGINT NOT NULL,
-                date DATE NOT NULL,
-                PRIMARY KEY (ticker, event_timestamp)
+            CREATE TABLE IF NOT EXISTS dim_caiso_nodes (
+                node_id VARCHAR(30) PRIMARY KEY,
+                node_name VARCHAR(100) NOT NULL,
+                location VARCHAR(50) NOT NULL,
+                voltage_level_kv NUMERIC(5, 1) NOT NULL
             );
         """)
-        
-        # 2. Create Dimension Table
-        print("Creating table: dim_stocks...")
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS dim_stocks (
-                ticker VARCHAR(20) PRIMARY KEY,
-                company_name VARCHAR(100),
-                sector VARCHAR(50),
-                industry VARCHAR(50),
-                asset_category VARCHAR(20)
-            );
-        """)
-        
-        # 3. Populate Asset Dimension profiles
-        print("Populating dim_stocks with Forex & Commodity profiles...")
+
+        # Populate Node Dimension Profiles (NP15, SP15, ZP26 transmission hubs)
+        print("Populating dim_caiso_nodes with California Grid hubs...")
         dimensions = [
-            ("XAU_USD", "Gold Spot USD", "Commodities", "Precious Metals", "Commodity"),
-            ("XAG_USD", "Silver Spot USD", "Commodities", "Precious Metals", "Commodity"),
-            ("USD_JPY", "USD to JPY Forex", "Forex", "Currency Pair", "Fiat")
+            ('TH_NP15', 'North Path 15 Transmission Hub', 'Northern California', 500.0),
+            ('TH_SP15', 'South Path 15 Transmission Hub', 'Southern California', 500.0),
+            ('TH_ZP26', 'Zone Path 26 Transmission Hub', 'Central California', 500.0)
         ]
-        for ticker, name, sec, ind, cat in dimensions:
+        for node_id, name, loc, volt in dimensions:
             cursor.execute("""
-                INSERT INTO dim_stocks (ticker, company_name, sector, industry, asset_category)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (ticker) DO NOTHING;
-            """, (ticker, name, sec, ind, cat))
-            
+                INSERT INTO dim_caiso_nodes (node_id, node_name, location, voltage_level_kv)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (node_id) DO NOTHING;
+            """, (node_id, name, loc, volt))
+
+        # 2. Create Fact CAISO LMP Table (Wholesale Prices)
+        print("Creating table: fact_caiso_lmp...")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fact_caiso_lmp (
+                node VARCHAR(30) NOT NULL REFERENCES dim_caiso_nodes(node_id),
+                event_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                lmp_type VARCHAR(10) NOT NULL, -- 'LMP' (total price), 'MCC' (congestion), 'MCL' (loss)
+                price_per_mwh NUMERIC(10, 2) NOT NULL, -- Price in USD/MWh
+                date DATE NOT NULL,
+                PRIMARY KEY (node, event_timestamp, lmp_type)
+            );
+        """)
+
+        # 3. Create Fact CAISO Load Table (Grid Demand/Load)
+        print("Creating table: fact_caiso_load...")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fact_caiso_load (
+                event_timestamp TIMESTAMP WITH TIME ZONE PRIMARY KEY,
+                actual_load_mw INTEGER NOT NULL, -- Live Load demand in Megawatts
+                forecast_load_mw INTEGER NOT NULL, -- Forecast demand in Megawatts
+                date DATE NOT NULL
+            );
+        """)
+        
         conn.commit()
         cursor.close()
         conn.close()
-        print("AWS RDS PostgreSQL Database schema created successfully!")
+        print("AWS RDS PostgreSQL Database schema initialized successfully!")
         
     except Exception as e:
         print(f"Failed to setup database: {e}")

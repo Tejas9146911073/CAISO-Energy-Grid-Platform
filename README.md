@@ -1,6 +1,6 @@
-# Real-Time Forex & Commodity Time-Series Data Pipeline (AWS Free Tier)
+# CAISO Real-Time Grid Data & Pricing Platform
 
-An enterprise-grade, lightweight, and cost-efficient ($0/month) real-time data engineering pipeline designed to ingest, stream, and store 5-minute interval financial candles for Forex pairs (`USD_JPY`) and Commodities (`XAU_USD`, `XAG_USD`) from the **Oanda API** into a time-series optimized **AWS RDS PostgreSQL** database.
+An enterprise-grade, lightweight, and cost-efficient ($0/month) real-time data engineering platform designed to ingest, stream, and store 5-minute interval electrical grid data from the **California ISO (CAISO)**. The platform captures wholesale electricity prices (**Locational Marginal Pricing - LMPs**) and **System Load** (grid demand vs forecast) and loads them into a time-series optimized **AWS RDS PostgreSQL** database.
 
 ---
 
@@ -8,7 +8,7 @@ An enterprise-grade, lightweight, and cost-efficient ($0/month) real-time data e
 
 ```mermaid
 graph LR
-    Oanda[Oanda API] -->|M5 candles| EC2_Prod[EC2: producer.py]
+    CAISO[CAISO API via gridstatus] -->|5-min LMPs & Load| EC2_Prod[EC2: producer.py]
     EC2_Prod -->|Publish SSL| Aiven[Aiven Managed Kafka]
     Aiven -->|Read Stream| EC2_Cons[EC2: consumer.py]
     EC2_Cons -->|Bulk-Insert| RDS_PG[Amazon RDS PostgreSQL]
@@ -17,24 +17,28 @@ graph LR
     EC2_Back -->|Gap-Filling Upsert| RDS_PG
 ```
 
-1. **Ingestion Layer (`producer.py`)**: Runs 24/7 on an EC2 instance. It polls Oanda’s REST API every 10 seconds. When a new 5-minute candle completes, it publishes the OHLC (Open, High, Low, Close) values and volume to Kafka.
-2. **Event Streaming Layer (Aiven Kafka)**: A fully managed, serverless Kafka cluster on the cloud. Decouples ingestion from ingestion, protecting against message loss.
-3. **Processing & Storage (`consumer.py`)**: A lightweight Python script consuming messages from Kafka and writing them to **Amazon RDS PostgreSQL** in real-time.
-4. **Self-Healing & Gap-Filling (`backfill.py`)**: A daily cron job that queries Oanda's history for the entire day's candles and performs a database `UPSERT`. If any candles were missed due to network drops, it automatically heals the database gaps.
+1. **Ingestion Layer (`producer.py`)**: Runs 24/7 on an EC2 instance. It polls CAISO every 15 seconds. When a new 5-minute pricing or demand interval completes, it multiplexes the records into a single Kafka stream.
+2. **Event Streaming Layer (Aiven Kafka)**: A managed serverless Kafka broker that buffers grid events and prevents database write-locking.
+3. **Consumer Layer (`consumer.py`)**: A lightweight daemon consuming grid events and executing bulk database inserts.
+4. **Self-Healing & Reconciliation (`backfill.py`)**: A daily cron job that queries today's historical grid records and performs a database `UPSERT` to automatically heal any data gaps from temporary network drops.
 
 ---
 
-## 🛠️ Technology Stack
+## 🗄️ Database Design & Optimization
+The database runs on **Amazon RDS PostgreSQL** (`db.t4g.micro` - Free Tier) and tracks three key grid transmission hubs:
+* **`TH_NP15`** (Northern California Transmission Hub)
+* **`TH_SP15`** (Southern California Transmission Hub)
+* **`TH_ZP26`** (Central California Transmission Hub)
 
-* **Source API**: Oanda Developer API (5-minute `M5` granularity candles).
-* **Message Broker**: Aiven for Apache Kafka (Managed, Serverless, SSL-encrypted).
-* **Database**: AWS RDS PostgreSQL (`db.t4g.micro` - Free Tier) with B-Tree composite indexes optimized for time-series range scans.
-* **Orchestration**: Systemd Services (for 24/7 streaming) and Linux Cron (for daily reconciliation).
-* **Environment**: AWS EC2 (`t2.micro` - Free Tier Ubuntu 22.04 LTS).
+### Schema & Indexing
+To optimize range queries for downstream analytics and backtesting, the database structures:
+* **`fact_caiso_lmp`**: Stores LMPs (Total wholesale price, congestion, and loss components).
+* **`fact_caiso_load`**: Stores actual demand vs forecasted demand in Megawatts (MW).
+* **B-Tree Indexing**: A composite index is created on `(node, event_timestamp DESC)` to allow sub-millisecond query search times.
 
 ---
 
-## 📁 Repository Structure
+## ⚙️ Repository Structure
 
 ```text
 ├── db_setup.py          # Database schema initialization script
@@ -43,82 +47,42 @@ graph LR
 ├── .gitignore           # Safety rules (hides keys and certs)
 ├── requirements.txt     # Python package dependencies
 └── kafka/
-    ├── db_bootstrap.py  # 10-year historical pagination loader (2016-today)
-    ├── producer.py      # Real-time Oanda-to-Aiven Kafka publisher
-    ├── consumer.py      # Real-time Aiven Kafka-to-PostgreSQL loader
-    └── backfill.py      # Daily gap-filling & reconciliation script
+    ├── caiso_bootstrap.py # 7-day historical pagination loader
+    ├── producer.py        # Real-time CAISO-to-Aiven Kafka publisher
+    ├── consumer.py        # Real-time Aiven Kafka-to-PostgreSQL loader
+    └── backfill.py        # Daily gap-filling & reconciliation script
 ```
 
 ---
 
-## ⚙️ Configuration & Deployment
+## 🚀 Setup & Execution (On EC2)
 
-### 1. Database Setup (AWS RDS PostgreSQL)
-Create a PostgreSQL database on AWS RDS using the **Free Tier** template:
-* Class: `db.t4g.micro` (or `db.t2.micro`)
-* Storage: 20 GB gp2 SSD (Autoscaling disabled)
-* Public Access: **Yes** (to query from Spyder/local IDEs)
-* Port: `5432` (Security Group inbound rule open to public `0.0.0.0/0`)
-
-### 2. Message Broker (Aiven Kafka)
-Sign up on Aiven, create a free **Apache Kafka** cluster, and:
-1. Create a topic named **`stock-prices`**.
-2. Download the **CA Certificate** (`ca.pem`) and save it in the project root directory.
-3. Copy the **Service URI** (Bootstrap Server).
-
-### 3. Environment Variables (`.env`)
-Create a `.env` file in the root folder:
-```env
-OANDA_API_KEY=your_oanda_api_key
-OANDA_ENVIRONMENT=practice
-
-AIVEN_KAFKA_BOOTSTRAP_SERVER=your_aiven_uri:port
-AIVEN_KAFKA_CA_CERT_PATH=/home/ubuntu/Real-Time-Stock-Data-Engineering-Project/ca.pem
-
-RDS_POSTGRES_HOST=your_rds_endpoint
-RDS_POSTGRES_USER=postgres
-RDS_POSTGRES_PASSWORD=your_db_password
-```
-
-### 4. Database Bootstrapping
-Before starting the live streams, run the database setup and load 10 years of historical data:
+### 1. Database Setup
+Ensure your `.env` contains your AWS RDS credentials, and run the schema setup:
 ```bash
-# 1. Create tables and Dimension profiles
 python db_setup.py
-
-# 2. Bulk-load historical M5 candles (2016-Today) and build B-Tree indexes
-python kafka/db_bootstrap.py
 ```
 
-### 5. Running 24/7 on EC2
-Deploy the scripts as Systemd background daemons on your Ubuntu instance:
+### 2. Historical Bootstrapping
+Load the last 7 days of 5-minute historical pricing and load data:
 ```bash
-sudo nano /etc/systemd/system/forex-consumer.service
+python kafka/caiso_bootstrap.py
 ```
-Paste the following config:
-```ini
-[Unit]
-Description=Oanda Forex PostgreSQL Consumer
-After=network.target
 
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/Real-Time-Stock-Data-Engineering-Project
-ExecStart=/home/ubuntu/Real-Time-Stock-Data-Engineering-Project/.venv/bin/python /home/ubuntu/Real-Time-Stock-Data-Engineering-Project/kafka/consumer.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-Enable and start the service:
+### 3. Run Ingestion 24/7 (Systemd)
+Configure the producer and consumer as background services (`/etc/systemd/system/`):
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable forex-consumer
-sudo systemctl start forex-consumer
+# Start the live producer
+sudo systemctl start caiso-producer
+sudo systemctl enable caiso-producer
+
+# Start the live consumer
+sudo systemctl start caiso-consumer
+sudo systemctl enable caiso-consumer
 ```
-*(Repeat the same configuration for the producer script `producer.py` to keep it running 24/7).*
 
----
-
-## 📈 Time-Series Query Optimization
-To optimize read operations for strategy backtesting (e.g., in Spyder or Jupyter Notebooks), the database builds a composite B-Tree index on `(ticker, event_timestamp DESC)`. This reduces query search complexity from $O(N)$ full table scans to $O(\log N)$ index scans, returning years of data in milliseconds.
+### 4. Schedule Daily Gap-Filling (Cron)
+Add the daily backfiller to your crontab running daily at 23:59 UTC:
+```bash
+59 23 * * * /home/ubuntu/CAISO-Energy-Grid-Platform/.venv/bin/python /home/ubuntu/CAISO-Energy-Grid-Platform/kafka/backfill.py >> /home/ubuntu/backfill.log 2>&1
+```
