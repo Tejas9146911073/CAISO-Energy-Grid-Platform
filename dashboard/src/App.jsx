@@ -10,7 +10,6 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  // Default API URL (can be changed to your EC2 public IP)
   const [apiUrl, setApiUrl] = useState(() => {
     return localStorage.getItem('caiso_api_url') || 'http://localhost:8000';
   });
@@ -23,12 +22,11 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState('TH_SP15');
   const [priceData, setPriceData] = useState([]);
   const [loadData, setLoadData] = useState([]);
-  const [priceIntervals, setPriceIntervals] = useState(72); // 72 = 6 hours
+  const [priceIntervals, setPriceIntervals] = useState(72);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastRefreshed, setLastRefreshed] = useState(new Date());
 
-  // Save API URL
   const handleSaveApiUrl = (e) => {
     e.preventDefault();
     let url = tempUrl.trim();
@@ -38,7 +36,6 @@ export default function App() {
     setShowConfig(false);
   };
 
-  // Fetch all dashboard data
   const fetchData = async () => {
     setLoading(true);
     setError(null);
@@ -51,7 +48,7 @@ export default function App() {
       const nodesRes = await axios.get(`${apiUrl}/api/nodes`);
       setNodes(nodesRes.data);
 
-      // 3. Fetch Prices for Selected Node
+      // 3. Fetch Prices
       const priceRes = await axios.get(`${apiUrl}/api/prices?node=${selectedNode}&limit=${priceIntervals}`);
       setPriceData(priceRes.data.data.map(item => ({
         ...item,
@@ -78,20 +75,27 @@ export default function App() {
 
   useEffect(() => {
     fetchData();
-    // Auto-refresh every 30 seconds for live streaming updates
     const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, [apiUrl, selectedNode, priceIntervals]);
 
-  // Current selected price
+  // Derive latest price and live demand
   const latestPrice = priceData.length > 0 ? priceData[priceData.length - 1].price_per_mwh : null;
-  const latestDemand = status?.caiso_grid_load?.current_demand_mw || null;
+  
+  // Safe demand calculation: check status API -> then check latest non-zero actual load in loadData -> then forecast
+  let latestDemand = status?.caiso_grid_load?.current_demand_mw;
+  if (!latestDemand || latestDemand <= 0) {
+    const validLoads = loadData.filter(d => d.actual_load_mw > 0);
+    if (validLoads.length > 0) {
+      latestDemand = validLoads[validLoads.length - 1].actual_load_mw;
+    } else if (loadData.length > 0) {
+      latestDemand = loadData[loadData.length - 1].forecast_load_mw;
+    }
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6 lg:p-8">
-      {/* ======================================================== */}
-      {/* HEADER & API CONFIGURATION                               */}
-      {/* ======================================================== */}
+      {/* Header */}
       <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-6 border-b border-slate-800">
         <div>
           <div className="flex items-center gap-3">
@@ -161,9 +165,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ======================================================== */}
-      {/* REAL-TIME SYSTEM METRICS CARDS                           */}
-      {/* ======================================================== */}
+      {/* Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
         {/* Metric 1: Wholesale LMP Price */}
         <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl relative overflow-hidden">
@@ -172,7 +174,7 @@ export default function App() {
             <TrendingUp className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-3xl font-bold font-mono text-amber-300">
-            {latestPrice !== null ? `$${latestPrice.toFixed(2)}` : 'Loading...'}
+            {latestPrice !== null ? `$${latestPrice.toFixed(2)}` : '---'}
             <span className="text-xs text-slate-400 font-sans font-normal ml-1">/ MWh</span>
           </div>
           <p className="text-xs text-slate-500 mt-1">Real-Time Dispatch 5-Min Settlement</p>
@@ -185,10 +187,10 @@ export default function App() {
             <Activity className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="text-3xl font-bold font-mono text-cyan-300">
-            {latestDemand !== null ? `${latestDemand.toLocaleString()}` : 'Loading...'}
+            {latestDemand && latestDemand > 0 ? `${Number(latestDemand).toLocaleString()}` : '---'}
             <span className="text-xs text-slate-400 font-sans font-normal ml-1">MW</span>
           </div>
-          <p className="text-xs text-slate-500 mt-1">California Grid Total Load</p>
+          <p className="text-xs text-slate-500 mt-1">California Grid Total Demand</p>
         </div>
 
         {/* Metric 3: Total Records in DB */}
@@ -219,9 +221,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ======================================================== */}
-      {/* INTERACTIVE TIME-SERIES PRICING CHART                    */}
-      {/* ======================================================== */}
+      {/* Pricing Area Chart */}
       <div className="mt-8 bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-6">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
           <div>
@@ -233,7 +233,6 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Hub Selector */}
             <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
               {['TH_NP15', 'TH_SP15', 'TH_ZP26'].map((node) => (
                 <button
@@ -250,7 +249,6 @@ export default function App() {
               ))}
             </div>
 
-            {/* Interval Limit */}
             <select
               value={priceIntervals}
               onChange={(e) => setPriceIntervals(Number(e.target.value))}
@@ -264,7 +262,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Pricing Area Chart */}
         <div className="h-72 sm:h-80 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={priceData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
@@ -288,9 +285,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ======================================================== */}
-      {/* SYSTEM LOAD DEMAND VS FORECAST CHART                     */}
-      {/* ======================================================== */}
+      {/* Grid Demand Line Chart */}
       <div className="mt-8 bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-6">
         <div className="mb-6">
           <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
@@ -300,7 +295,6 @@ export default function App() {
           <p className="text-xs text-slate-400">Comparing real-time dispatch load against system forecasts in Megawatts</p>
         </div>
 
-        {/* Load Line Chart */}
         <div className="h-72 sm:h-80 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={loadData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
@@ -320,9 +314,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ======================================================== */}
-      {/* DATA CATALOG (TRANSMISSION NODES METADATA)               */}
-      {/* ======================================================== */}
+      {/* Nodes Catalog Table */}
       <div className="mt-8 bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-6 mb-8">
         <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2 mb-4">
           <Layers className="w-5 h-5 text-indigo-400" />
@@ -359,7 +351,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Footer */}
       <footer className="text-center text-xs text-slate-500 py-4 border-t border-slate-800/60">
         CAISO Real-Time Energy Grid & Analytics Platform • Ingested via Kafka &bull; Stored on AWS RDS PostgreSQL &bull; Built with FastAPI & React
       </footer>

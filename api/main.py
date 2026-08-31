@@ -66,12 +66,16 @@ def get_pipeline_status():
         """)
         lmp_stat = cursor.fetchone()
         
-        # Get total counts and latest timestamp from fact_caiso_load
+        # Get total counts, latest timestamp, and latest non-zero demand from fact_caiso_load
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_load_records,
                 MAX(event_timestamp) as latest_load_time,
-                (SELECT actual_load_mw FROM fact_caiso_load ORDER BY event_timestamp DESC LIMIT 1) as current_demand_mw
+                COALESCE(
+                    (SELECT actual_load_mw FROM fact_caiso_load WHERE actual_load_mw > 0 ORDER BY event_timestamp DESC LIMIT 1),
+                    (SELECT forecast_load_mw FROM fact_caiso_load WHERE forecast_load_mw > 0 ORDER BY event_timestamp DESC LIMIT 1),
+                    0
+                ) as current_demand_mw
             FROM fact_caiso_load;
         """)
         load_stat = cursor.fetchone()
@@ -84,13 +88,13 @@ def get_pipeline_status():
             "ingestion_stream": "Aiven Kafka (SASL_SSL)",
             "database": "AWS RDS PostgreSQL (Time-Series B-Tree Indexed)",
             "caiso_pricing": {
-                "total_records": lmp_stat["total_lmp_records"],
-                "latest_timestamp": str(lmp_stat["latest_lmp_time"])
+                "total_records": lmp_stat["total_lmp_records"] if lmp_stat else 0,
+                "latest_timestamp": str(lmp_stat["latest_lmp_time"]) if lmp_stat and lmp_stat["latest_lmp_time"] else None
             },
             "caiso_grid_load": {
-                "total_records": load_stat["total_load_records"],
-                "latest_timestamp": str(load_stat["latest_load_time"]),
-                "current_demand_mw": load_stat["current_demand_mw"]
+                "total_records": load_stat["total_load_records"] if load_stat else 0,
+                "latest_timestamp": str(load_stat["latest_load_time"]) if load_stat and load_stat["latest_load_time"] else None,
+                "current_demand_mw": load_stat["current_demand_mw"] if load_stat else 0
             }
         }
     except Exception as e:
@@ -127,7 +131,6 @@ def get_caiso_prices(
         cursor.close()
         conn.close()
         
-        # Reverse to chronological order (oldest to newest) for charting
         data = [{
             "node": row["node"],
             "timestamp": row["event_timestamp"].isoformat(),
