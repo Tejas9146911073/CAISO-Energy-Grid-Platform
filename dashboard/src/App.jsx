@@ -10,8 +10,9 @@ import {
 } from 'lucide-react';
 
 export default function App() {
+  // Production default API is our secure Cloudflare HTTPS endpoint
   const [apiUrl, setApiUrl] = useState(() => {
-    return localStorage.getItem('caiso_api_url') || 'http://localhost:8000';
+    return localStorage.getItem('caiso_api_url') || 'https://api.tencercloud.site';
   });
   const [showConfig, setShowConfig] = useState(false);
   const [tempUrl, setTempUrl] = useState(apiUrl);
@@ -67,7 +68,7 @@ export default function App() {
       setLastRefreshed(new Date());
     } catch (err) {
       console.error('Failed to fetch data:', err);
-      setError(`Cannot connect to API at ${apiUrl}. Please ensure FastAPI is running and Port 8000 is open in your AWS Security Group.`);
+      setError(`Cannot connect to API at ${apiUrl}. Connecting to production backend...`);
     } finally {
       setLoading(false);
     }
@@ -82,7 +83,6 @@ export default function App() {
   // Derive latest price and live demand
   const latestPrice = priceData.length > 0 ? priceData[priceData.length - 1].price_per_mwh : null;
   
-  // Safe demand calculation: check status API -> then check latest non-zero actual load in loadData -> then forecast
   let latestDemand = status?.caiso_grid_load?.current_demand_mw;
   if (!latestDemand || latestDemand <= 0) {
     const validLoads = loadData.filter(d => d.actual_load_mw > 0);
@@ -121,10 +121,10 @@ export default function App() {
 
           <button
             onClick={() => setShowConfig(!showConfig)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded-lg text-xs transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded-lg text-xs transition text-slate-400 hover:text-slate-200"
           >
             <Settings className="w-3.5 h-3.5" />
-            API Config
+            Backend Config
           </button>
 
           <button
@@ -147,7 +147,7 @@ export default function App() {
               type="text"
               value={tempUrl}
               onChange={(e) => setTempUrl(e.target.value)}
-              placeholder="http://YOUR_EC2_PUBLIC_IP:8000"
+              placeholder="https://api.tencercloud.site"
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm font-mono text-amber-300 focus:outline-none focus:border-amber-500"
             />
           </div>
